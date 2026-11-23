@@ -1,65 +1,70 @@
-// Entry point for the news-image-20261123 make.fun entry (NYT-style).
-// Node 22, standard library only. No network, no randomness.
-// Copies entry.png (sitting next to this file) into the output
-// directory after checking it against the competition's image gate,
-// then confirms the written copy is byte-for-byte identical.
+// NYT front page for news-image-20261123: one image, one program.
+// Node 22 standard library only — nothing is fetched, nothing is
+// random, nothing depends on the clock. The program locates
+// entry.png beside itself, checks it against the image gate,
+// copies it into the output folder and proves the copy matches.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
-const PNG_MAGIC = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const MAX_BYTES = 1_048_576; // 1 MiB
-const MAX_SIDE = 1024; // pixels
+const SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const BYTE_LIMIT = 1048576;
+const SIDE_LIMIT = 1024;
 
-function die(message) {
-  console.error(`error: ${message}`);
-  process.exit(1);
+class GateError extends Error {}
+
+function loadEntry() {
+  const location = path.join(import.meta.dirname, "entry.png");
+  if (!fs.existsSync(location)) {
+    throw new GateError(`entry.png is missing next to main.ts (${location})`);
+  }
+  return fs.readFileSync(location);
 }
 
-// Resolve the image relative to this script's own folder, never the
-// process working directory (the grader runs us from elsewhere).
-const here = dirname(fileURLToPath(import.meta.url));
-const source = join(here, "entry.png");
-
-if (!existsSync(source)) {
-  die(`entry.png not found next to main.ts (looked in ${here})`);
+function checkImage(image) {
+  if (image.length < 8 || !image.subarray(0, 8).equals(SIGNATURE)) {
+    throw new GateError("entry.png fails the PNG signature check");
+  }
+  if (image.length > BYTE_LIMIT) {
+    throw new GateError(`entry.png is ${image.length} bytes, above the 1 MiB cap`);
+  }
+  if (image.length < 24) {
+    throw new GateError("entry.png is too short to carry an IHDR chunk");
+  }
+  const declaredLength = image.readUInt32BE(8);
+  const chunkName = image.subarray(12, 16).toString("ascii");
+  if (declaredLength !== 13 || chunkName !== "IHDR") {
+    throw new GateError("entry.png has no IHDR chunk");
+  }
+  const width = image.readUInt32BE(16);
+  const height = image.readUInt32BE(20);
+  if (width === 0 || height === 0) {
+    throw new GateError("entry.png declares a zero dimension");
+  }
+  if (width > SIDE_LIMIT || height > SIDE_LIMIT) {
+    throw new GateError(`entry.png is ${width} by ${height}, above the 1024 by 1024 cap`);
+  }
+  return { width, height };
 }
 
-const bytes = readFileSync(source);
-
-if (bytes.length < 8 || !bytes.subarray(0, 8).equals(PNG_MAGIC)) {
-  die("entry.png is not a valid PNG (bad signature)");
+function writeEntry(image) {
+  const folder = process.env.MAKEFUN_OUTPUT_DIR || "/output";
+  fs.mkdirSync(folder, { recursive: true });
+  const destination = path.join(folder, "entry.png");
+  fs.writeFileSync(destination, image);
+  const back = fs.readFileSync(destination);
+  if (!back.equals(image)) {
+    throw new GateError("the written copy is not identical to the source");
+  }
+  return destination;
 }
 
-if (bytes.length > MAX_BYTES) {
-  die(`entry.png is ${bytes.length} bytes, over the 1 MiB limit`);
+try {
+  const image = loadEntry();
+  const size = checkImage(image);
+  const destination = writeEntry(image);
+  console.log(`wrote ${destination} (${image.length} bytes, ${size.width}x${size.height})`);
+} catch (error) {
+  console.error(`error: ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 }
-
-// PNG header layout: 4-byte length (13) at offset 8, "IHDR" at 12,
-// big-endian width at 16, big-endian height at 20.
-if (bytes.length < 24) {
-  die("entry.png is too short to hold an IHDR chunk");
-}
-if (bytes.readUInt32BE(8) !== 13 || bytes.subarray(12, 16).toString("ascii") !== "IHDR") {
-  die("entry.png is missing its IHDR chunk");
-}
-const width = bytes.readUInt32BE(16);
-const height = bytes.readUInt32BE(20);
-
-if (width > MAX_SIDE || height > MAX_SIDE) {
-  die(`entry.png is ${width}x${height}, over the 1024x1024 limit`);
-}
-
-const outDir = process.env.MAKEFUN_OUTPUT_DIR || "/output";
-mkdirSync(outDir, { recursive: true });
-
-const target = join(outDir, "entry.png");
-writeFileSync(target, bytes);
-
-const written = readFileSync(target);
-if (!written.equals(bytes)) {
-  die("written output does not match the source byte-for-byte");
-}
-
-console.log(`entry.png -> ${target} (${bytes.length} bytes, ${width}x${height})`);
